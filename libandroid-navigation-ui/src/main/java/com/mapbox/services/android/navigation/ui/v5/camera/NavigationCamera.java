@@ -29,6 +29,7 @@ import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import timber.log.Timber;
 
@@ -46,13 +47,36 @@ import static com.mapbox.services.android.navigation.v5.navigation.NavigationCon
  */
 public class NavigationCamera implements LifecycleObserver {
 
+  /**
+   * Camera tracks the user location, with bearing provided by the location update.
+   * <p>
+   * Equivalent of the {@link CameraMode#TRACKING_GPS}.
+   */
+  public static final int NAVIGATION_TRACKING_MODE_GPS = 0;
+  /**
+   * Camera tracks the user location, with bearing always set to north (0).
+   * <p>
+   * Equivalent of the {@link CameraMode#TRACKING_GPS_NORTH}.
+   */
+  public static final int NAVIGATION_TRACKING_MODE_NORTH = 1;
+  /**
+   * Camera does not tack the user location.
+   * <p>
+   * Equivalent of the {@link CameraMode#NONE}.
+   */
+  public static final int NAVIGATION_TRACKING_MODE_NONE = 2;
   private static final int ONE_POINT = 1;
-
+  private final CopyOnWriteArrayList<OnTrackingModeTransitionListener> onTrackingModeTransitionListeners
+    = new CopyOnWriteArrayList<>();
+  private final CopyOnWriteArrayList<OnTrackingModeChangedListener> onTrackingModeChangedListeners
+    = new CopyOnWriteArrayList<>();
   private MapboxMap mapboxMap;
   private LocationComponent locationComponent;
   private MapboxNavigation navigation;
   private RouteInformation currentRouteInformation;
   private RouteProgress currentRouteProgress;
+  @TrackingMode
+  private int trackingCameraMode = NAVIGATION_TRACKING_MODE_GPS;
   private ProgressChangeListener progressChangeListener = new ProgressChangeListener() {
     @Override
     public void onProgressChange(Location location, RouteProgress routeProgress) {
@@ -63,38 +87,6 @@ public class NavigationCamera implements LifecycleObserver {
       }
     }
   };
-
-  @Retention(RetentionPolicy.SOURCE)
-  @IntDef( {NAVIGATION_TRACKING_MODE_GPS,
-    NAVIGATION_TRACKING_MODE_NORTH,
-    NAVIGATION_TRACKING_MODE_NONE
-  })
-  public @interface TrackingMode {
-  }
-
-  /**
-   * Camera tracks the user location, with bearing provided by the location update.
-   * <p>
-   * Equivalent of the {@link CameraMode#TRACKING_GPS}.
-   */
-  public static final int NAVIGATION_TRACKING_MODE_GPS = 0;
-
-  /**
-   * Camera tracks the user location, with bearing always set to north (0).
-   * <p>
-   * Equivalent of the {@link CameraMode#TRACKING_GPS_NORTH}.
-   */
-  public static final int NAVIGATION_TRACKING_MODE_NORTH = 1;
-
-  /**
-   * Camera does not tack the user location.
-   * <p>
-   * Equivalent of the {@link CameraMode#NONE}.
-   */
-  public static final int NAVIGATION_TRACKING_MODE_NONE = 2;
-
-  @TrackingMode
-  private int trackingCameraMode = NAVIGATION_TRACKING_MODE_GPS;
 
   /**
    * Creates an instance of {@link NavigationCamera}.
@@ -167,7 +159,7 @@ public class NavigationCamera implements LifecycleObserver {
    */
   public void updateCameraTrackingMode(@TrackingMode int trackingMode) {
     trackingCameraMode = trackingMode;
-    setCameraMode();
+    setCameraMode(trackingCameraMode);
   }
 
   /**
@@ -247,6 +239,58 @@ public class NavigationCamera implements LifecycleObserver {
     this.navigation = navigation;
     navigation.setCameraEngine(new DynamicCamera(mapboxMap));
     navigation.addProgressChangeListener(progressChangeListener);
+  }
+
+  /**
+   * Adds given tracking mode transition listener for receiving notification of camera
+   * transition updates.
+   *
+   * @param listener to be added
+   */
+  public void addOnTrackingModeTransitionListener(OnTrackingModeTransitionListener listener) {
+    onTrackingModeTransitionListeners.add(listener);
+  }
+
+  /**
+   * Removes given tracking mode transition listener for receiving notification of camera
+   * transition updates.
+   *
+   * @param listener to be removed
+   */
+  public void removeOnTrackingModeTransitionListener(OnTrackingModeTransitionListener listener) {
+    onTrackingModeTransitionListeners.remove(listener);
+  }
+
+  /**
+   * Adds given tracking mode changed listener for receiving notification of camera
+   * mode changes.
+   *
+   * @param listener to be added
+   */
+  public void addOnTrackingModeChangedListener(OnTrackingModeChangedListener listener) {
+    onTrackingModeChangedListeners.add(listener);
+  }
+
+  /**
+   * Removes given tracking mode transition listener for receiving notification of camera
+   * mode changes.
+   *
+   * @param listener to be removed
+   */
+  public void removeOnTrackingModeChangedListener(OnTrackingModeChangedListener listener) {
+    onTrackingModeChangedListeners.remove(listener);
+  }
+
+  void updateTransitionListenersFinished() {
+    for (OnTrackingModeTransitionListener listener : onTrackingModeTransitionListeners) {
+      listener.onTransitionFinished(trackingCameraMode);
+    }
+  }
+
+  void updateTransitionListenersCancelled() {
+    for (OnTrackingModeTransitionListener listener : onTrackingModeTransitionListeners) {
+      listener.onTransitionCancelled(trackingCameraMode);
+    }
   }
 
   private void initializeWith(MapboxNavigation navigation) {
@@ -333,7 +377,7 @@ public class NavigationCamera implements LifecycleObserver {
       .build();
   }
 
-  private void setCameraMode() {
+  private void setCameraMode(@TrackingMode int trackingCameraMode) {
     @CameraMode.Mode int mode;
     if (trackingCameraMode == NAVIGATION_TRACKING_MODE_GPS) {
       mode = CameraMode.TRACKING_GPS;
@@ -346,8 +390,16 @@ public class NavigationCamera implements LifecycleObserver {
       Timber.e("Using unsupported camera tracking mode - %d.", trackingCameraMode);
     }
 
+    updateModeChangedListenersWith(trackingCameraMode);
+
     if (mode != locationComponent.getCameraMode()) {
-      locationComponent.setCameraMode(mode);
+      locationComponent.setCameraMode(mode, new NavigationCameraTransitionListener(this));
+    }
+  }
+
+  private void updateModeChangedListenersWith(@TrackingMode int trackingMode) {
+    for (OnTrackingModeChangedListener listener : onTrackingModeChangedListeners) {
+      listener.onTrackingModeChanged(trackingMode);
     }
   }
 
@@ -386,5 +438,13 @@ public class NavigationCamera implements LifecycleObserver {
       500 * tiltDiff,
       NAVIGATION_MIN_CAMERA_TILT_ADJUSTMENT_ANIMATION_DURATION,
       NAVIGATION_MAX_CAMERA_ADJUSTMENT_ANIMATION_DURATION);
+  }
+
+  @Retention(RetentionPolicy.SOURCE)
+  @IntDef( {NAVIGATION_TRACKING_MODE_GPS,
+    NAVIGATION_TRACKING_MODE_NORTH,
+    NAVIGATION_TRACKING_MODE_NONE
+  })
+  public @interface TrackingMode {
   }
 }
